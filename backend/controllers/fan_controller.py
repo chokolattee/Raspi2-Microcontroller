@@ -6,7 +6,7 @@ fan_bp = Blueprint("fan", __name__, url_prefix="/api/fan")
 
 @fan_bp.route("/latest", methods=["GET"])
 def get_latest():
-    db = current_app.db
+    db  = current_app.db
     doc = db.fan_logs.find_one(sort=[("timestamp", -1)])
     if doc is None:
         return jsonify({"message": "No data yet"}), 404
@@ -15,7 +15,7 @@ def get_latest():
 
 @fan_bp.route("/history", methods=["GET"])
 def get_history():
-    db = current_app.db
+    db   = current_app.db
     docs = list(
         db.fan_logs.find(
             {}, {"_id": 1, "state": 1, "mode": 1, "timestamp": 1}
@@ -28,8 +28,8 @@ def get_history():
 
 @fan_bp.route("/control", methods=["POST"])
 def control():
-    body = request.get_json(force=True, silent=True) or {}
-    mode  = body.get("mode", "automatic").lower()
+    body  = request.get_json(force=True, silent=True) or {}
+    mode  = body.get("mode",  "automatic").lower()
     state = body.get("state", "off").lower()
 
     if mode not in ("manual", "automatic"):
@@ -38,13 +38,17 @@ def control():
     if mode == "manual" and state not in ("on", "off"):
         return jsonify({"error": "state must be 'on' or 'off' when mode is manual"}), 400
 
-    serial_reader = current_app.serial_reader
+    mqtt = current_app.mqtt_client
+
     if mode == "automatic":
-        serial_reader.send_command("FAN:AUTO")
-        state = "off"
+        # Tell ESP32 to return to auto threshold logic
+        mqtt.publish_command("esp32/fan/cmd", "AUTO")
+        state = "off"   # Reflect unknown state until next sensor publish
     else:
-        cmd = "FAN:ON" if state == "on" else "FAN:OFF"
-        serial_reader.send_command(cmd)
+        cmd = "ON" if state == "on" else "OFF"
+        mqtt.publish_command("esp32/fan/cmd", cmd)
+
+    # Persist intent log immediately
     db  = current_app.db
     doc = create_fan_log(state=state, mode=mode)
     db.fan_logs.insert_one(doc)

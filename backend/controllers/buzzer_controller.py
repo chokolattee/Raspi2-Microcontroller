@@ -6,7 +6,7 @@ buzzer_bp = Blueprint("buzzer", __name__, url_prefix="/api/buzzer")
 
 @buzzer_bp.route("/latest", methods=["GET"])
 def get_latest():
-    db = current_app.db
+    db  = current_app.db
     doc = db.buzzer_logs.find_one(sort=[("timestamp", -1)])
     if doc is None:
         return jsonify({"message": "No data yet"}), 404
@@ -15,7 +15,7 @@ def get_latest():
 
 @buzzer_bp.route("/history", methods=["GET"])
 def get_history():
-    db = current_app.db
+    db   = current_app.db
     docs = list(
         db.buzzer_logs.find(
             {}, {"_id": 1, "state": 1, "mode": 1, "timestamp": 1}
@@ -28,8 +28,8 @@ def get_history():
 
 @buzzer_bp.route("/control", methods=["POST"])
 def control():
-    body = request.get_json(force=True, silent=True) or {}
-    mode  = body.get("mode", "automatic").lower()
+    body  = request.get_json(force=True, silent=True) or {}
+    mode  = body.get("mode",  "automatic").lower()
     state = body.get("state", "off").lower()
 
     if mode not in ("manual", "automatic"):
@@ -38,16 +38,17 @@ def control():
     if mode == "manual" and state not in ("on", "off"):
         return jsonify({"error": "state must be 'on' or 'off' when mode is manual"}), 400
 
-    # Send serial command to ESP32
-    serial_reader = current_app.serial_reader
-    if mode == "automatic":
-        serial_reader.send_command("BUZZER:AUTO")
-        state = "off"
-    else:
-        cmd = "BUZZER:ON" if state == "on" else "BUZZER:OFF"
-        serial_reader.send_command(cmd)
+    mqtt = current_app.mqtt_client
 
-    # Persist log
+    if mode == "automatic":
+        # Tell ESP32 to return to UV threshold logic
+        mqtt.publish_command("esp32/buzzer/cmd", "AUTO")
+        state = "off"   # Reflect unknown state until next sensor publish
+    else:
+        cmd = "ON" if state == "on" else "OFF"
+        mqtt.publish_command("esp32/buzzer/cmd", cmd)
+
+    # Persist intent log immediately
     db  = current_app.db
     doc = create_buzzer_log(state=state, mode=mode)
     db.buzzer_logs.insert_one(doc)

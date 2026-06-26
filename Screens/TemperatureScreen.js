@@ -7,8 +7,10 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.1.100:8000'; // ← Update to your PC's local IP
-const POLL_MS = 2000;
+const BASE_URL = 'http://192.168.0.102:8000';
+const LIVE_MS = 3000;
+const HISTORY_MS = 10000;
+const MAX_LIVE_PTS = 20;
 
 // Helpers 
 
@@ -49,6 +51,7 @@ function SensorInfo({ theme }) {
         The DHT11 is a digital sensor that measures ambient temperature (0–50 °C, ±2 °C accuracy)
         and relative humidity (20–90 %, ±5 % RH). It communicates via a single-wire protocol,
         sampling once per second. Connected to the ESP32 on <Text style={styles.mono}>GPIO 4</Text>.
+        Data is transmitted wirelessly to the Raspberry Pi backend via MQTT.
       </Text>
 
       <View style={[styles.infoDivider, { borderColor: theme.cardBorder }]} />
@@ -60,7 +63,8 @@ function SensorInfo({ theme }) {
       <Text style={[styles.infoCardDesc, { color: theme.textSecondary }]}>
         A single-channel relay switches the 5 V DC fan circuit. The relay is{' '}
         <Text style={{ fontWeight: '700' }}>active LOW</Text> — the ESP32 drives the pin LOW to energise
-        the coil and close the circuit (fan ON).
+        the coil and close the circuit (fan ON). Commands are sent via MQTT ({' '}
+        <Text style={styles.mono}>esp32/fan/cmd</Text>).
       </Text>
       <View style={[styles.logicBox, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
         <Text style={[styles.logicTitle, { color: theme.primary }]}>Automatic Logic</Text>
@@ -79,7 +83,8 @@ function SensorInfo({ theme }) {
         <View style={styles.logicRow}>
           <Ionicons name="hand-left-outline" size={14} color={theme.warning} style={{ marginRight: 6 }} />
           <Text style={[styles.logicText, { color: theme.text }]}>
-            Manual mode overrides automatic until "Automatic" is pressed again
+            Manual mode overrides automatic until "Automatic" is pressed again.
+            Commands are sent via MQTT to <Text style={styles.mono}>esp32/fan/cmd</Text>.
           </Text>
         </View>
       </View>
@@ -203,43 +208,72 @@ export default function TemperatureScreen() {
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tempLatest, setTempLatest] = useState(null);
-  const [fanLatest, setFanLatest] = useState(null);
+
+  // Live snapshot from MQTT (drives hero card + fan state)
+  const [liveState, setLiveState] = useState(null);
+
+  // Rolling graph arrays for live chart
+  const [liveTemp, setLiveTemp] = useState([]);
+  const [liveTempLbl, setLiveTempLbl] = useState([]);
+  const [liveHum, setLiveHum] = useState([]);
+
+  // DB history (drives table only)
   const [tempHistory, setTempHistory] = useState([]);
   const [fanHistory, setFanHistory] = useState([]);
 
-  const fetchAll = useCallback(async () => {
+  const fetchLive = useCallback(async () => {
     try {
-      const [tl, fl, th, fh] = await Promise.allSettled([
-        apiFetch('/api/temperature/latest'),
-        apiFetch('/api/fan/latest'),
-        apiFetch('/api/temperature/history'),
-        apiFetch('/api/fan/history'),
-      ]);
-      if (tl.status === 'fulfilled') setTempLatest(tl.value);
-      if (fl.status === 'fulfilled') setFanLatest(fl.value);
-      if (th.status === 'fulfilled') setTempHistory(Array.isArray(th.value) ? [...th.value].reverse() : []);
-      if (fh.status === 'fulfilled') setFanHistory(Array.isArray(fh.value) ? [...fh.value].reverse() : []);
+      const data = await apiFetch('/api/sensors/live');
+      setLiveState(data);
+      if (data.last_updated) {
+        const label = new Date(data.last_updated).toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit',
+        });
+        if (data.temperature != null) {
+          setLiveTemp((p) => [...p, data.temperature].slice(-MAX_LIVE_PTS));
+          setLiveTempLbl((p) => [...p, label].slice(-MAX_LIVE_PTS));
+        }
+        if (data.humidity != null) {
+          setLiveHum((p) => [...p, data.humidity].slice(-MAX_LIVE_PTS));
+        }
+      }
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
 
+  const fetchHistory = useCallback(async () => {
+    try {
+      const [th, fh] = await Promise.allSettled([
+        apiFetch('/api/temperature/history'),
+        apiFetch('/api/fan/history'),
+      ]);
+      if (th.status === 'fulfilled') setTempHistory(Array.isArray(th.value) ? [...th.value].reverse() : []);
+      if (fh.status === 'fulfilled') setFanHistory(Array.isArray(fh.value) ? [...fh.value].reverse() : []);
+    } catch (e) { console.error(e); }
+  }, []);
+
   useEffect(() => {
-    fetchAll();
-    const t = setInterval(fetchAll, POLL_MS);
-    return () => clearInterval(t);
-  }, [fetchAll]);
+    fetchLive();
+    fetchHistory();
+    const t1 = setInterval(fetchLive, LIVE_MS);
+    const t2 = setInterval(fetchHistory, HISTORY_MS);
+    return () => { clearInterval(t1); clearInterval(t2); };
+  }, [fetchLive, fetchHistory]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchAll();
+    await Promise.allSettled([fetchLive(), fetchHistory()]);
     setRefreshing(false);
-  }, [fetchAll]);
+  }, [fetchLive, fetchHistory]);
 
   const controlFan = async (mode, state = 'off') => {
     try {
-      const r = await apiPost('/api/fan/control', { mode, state });
-      setFanLatest({ state: r.state, mode: r.mode, timestamp: new Date().toISOString() });
+      await apiPost('/api/fan/control', { mode, state });
+      // Optimistic update so badge flips instantly
+      setLiveState((prev) => prev
+        ? { ...prev, fan: state === 'on', fan_auto: mode === 'automatic' }
+        : prev);
+      fetchHistory();
     } catch (e) { console.error(e); }
   };
 
@@ -251,18 +285,18 @@ export default function TemperatureScreen() {
     );
   }
 
-  const temp = tempLatest?.value;
-  const hum = tempLatest?.humidity;
-  const fanMode = fanLatest?.mode || 'automatic';
-  const fanState = fanLatest?.state || 'off';
+  const temp = liveState?.temperature;
+  const hum = liveState?.humidity;
+  const fanMode = liveState?.fan_auto === false ? 'manual' : 'automatic';
+  const fanState = liveState?.fan ? 'on' : 'off';
   const tempColor = temp >= 35 ? theme.danger : temp >= 30 ? theme.warning : theme.primary;
 
-  // Chart arrays
-  const tempVals = tempHistory.map((r) => r.value || 0);
-  const humVals = tempHistory.map((r) => r.humidity || 0);
-  const tempLabels = tempHistory.map((r) => formatTs(r.timestamp).slice(0, 5));
+  // Chart arrays — prefer live points; fall back to DB history for initial render
+  const tempVals = liveTemp.length > 0 ? liveTemp : tempHistory.slice(-MAX_LIVE_PTS).map((r) => r.value || 0);
+  const humVals = liveHum.length > 0 ? liveHum : tempHistory.slice(-MAX_LIVE_PTS).map((r) => r.humidity || 0);
+  const tempLabels = liveTempLbl.length > 0 ? liveTempLbl : tempHistory.slice(-MAX_LIVE_PTS).map((r) => formatTs(r.timestamp).slice(0, 5));
 
-  // Combined table rows
+  // Combined table rows — use DB history for accurate saved records
   const tableRows = tempHistory.slice(-20).map((r, i) => ({
     id: r.id || i,
     timestamp: formatTs(r.timestamp),
@@ -286,6 +320,8 @@ export default function TemperatureScreen() {
     },
   ];
 
+  const lastUpdated = liveState?.last_updated;
+
   return (
     <ScrollView
       style={[styles.root, { backgroundColor: theme.bg }]}
@@ -300,11 +336,16 @@ export default function TemperatureScreen() {
         styles.heroCard,
         { backgroundColor: theme.card, borderColor: theme.cardBorder, borderTopColor: tempColor },
       ]}>
-        <View style={styles.heroCardHeader}>
+        <View style={[styles.heroCardHeader]}>
           <MaterialCommunityIcons name="thermometer" size={18} color={theme.textMuted} style={{ marginRight: 6 }} />
           <Text style={[styles.heroLabel, { color: theme.textMuted }]}>
-            DHT11 — Live Reading
+            DHT11 — Live Reading via MQTT
           </Text>
+          {lastUpdated ? (
+            <Text style={[styles.heroTs, { color: theme.textMuted, marginLeft: 'auto', marginBottom: 0, textAlign: 'right' }]}>
+              {formatTs(lastUpdated)}
+            </Text>
+          ) : null}
         </View>
 
         <View style={[styles.heroBody, isWide && styles.heroBodyWide]}>

@@ -7,10 +7,12 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.1.100:8000'; // ← Update to your PC's local IP
-const POLL_MS  = 2000;
+const BASE_URL = 'http://192.168.0.102:8000'; // Windows machine running Flask
+const LIVE_MS = 3000;   // poll /api/sensors/live
+const HISTORY_MS = 10000;  // poll DB history for tables
+const MAX_LIVE_PTS = 20;    // max rolling graph points
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 function formatTs(ts) {
   if (!ts) return '—';
@@ -37,7 +39,7 @@ async function apiPost(path, body) {
   return res.json();
 }
 
-// ── Info Banner ───────────────────────────────────────────────────────────────
+// Info Banner
 function InfoBanner({ theme }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
@@ -63,7 +65,7 @@ function InfoBanner({ theme }) {
       {!collapsed && (
         <View style={styles.infoBannerBody}>
           <Text style={[styles.infoBannerText, { color: theme.text }]}>
-            This dashboard monitors an ESP32 microcontroller connected via USB serial. Two sensors feed
+            This dashboard monitors an ESP32 microcontroller connected via MQTT over Wi-Fi. Two sensors feed
             real-time data to the system:
           </Text>
 
@@ -97,9 +99,8 @@ function InfoBanner({ theme }) {
               <Text style={[styles.infoLabel, { color: theme.text }]}>5 V DC Fan — Single-Channel Relay</Text>
               <Text style={[styles.infoDesc, { color: theme.textSecondary }]}>
                 <Text style={{ fontWeight: '700' }}>Automatic:</Text> Fan turns ON when temperature ≥ 30 °C to dissipate heat.{'\n'}
-                <Text style={{ fontWeight: '700' }}>Manual:</Text> Override with ON / OFF buttons; send{' '}
-                <Text style={{ fontFamily: 'monospace' }}>FAN:ON</Text> /{' '}
-                <Text style={{ fontFamily: 'monospace' }}>FAN:OFF</Text> via serial.
+                <Text style={{ fontWeight: '700' }}>Manual:</Text> Override with ON / OFF buttons; commands sent via MQTT to{' '}
+                <Text style={{ fontFamily: 'monospace' }}>esp32/fan/cmd</Text>.
               </Text>
             </View>
           </View>
@@ -110,9 +111,8 @@ function InfoBanner({ theme }) {
               <Text style={[styles.infoLabel, { color: theme.text }]}>Active Buzzer</Text>
               <Text style={[styles.infoDesc, { color: theme.textSecondary }]}>
                 <Text style={{ fontWeight: '700' }}>Automatic:</Text> Buzzer sounds when UV Index ≥ 3 (Moderate) to alert users of harmful UV exposure.{'\n'}
-                <Text style={{ fontWeight: '700' }}>Manual:</Text> Override with ON / OFF buttons; send{' '}
-                <Text style={{ fontFamily: 'monospace' }}>BUZZER:ON</Text> /{' '}
-                <Text style={{ fontFamily: 'monospace' }}>BUZZER:OFF</Text> via serial.
+                <Text style={{ fontWeight: '700' }}>Manual:</Text> Override with ON / OFF buttons; commands sent via MQTT to{' '}
+                <Text style={{ fontFamily: 'monospace' }}>esp32/buzzer/cmd</Text>.
               </Text>
             </View>
           </View>
@@ -122,7 +122,7 @@ function InfoBanner({ theme }) {
   );
 }
 
-// ── Sensor Card ───────────────────────────────────────────────────────────────
+// Sensor Card
 function SensorCard({ label, iconName, iconLib, value, unit, subLabel, subValue, color, theme, flex }) {
   const Icon = iconLib === 'mci' ? MaterialCommunityIcons : Ionicons;
   return (
@@ -148,7 +148,7 @@ function SensorCard({ label, iconName, iconLib, value, unit, subLabel, subValue,
   );
 }
 
-// ── Actuator Control Card ─────────────────────────────────────────────────────
+// Actuator Control Card 
 function ActuatorControl({ label, iconName, iconLib, mode, state, onManualOn, onManualOff, onAuto, theme, flex }) {
   const Icon = iconLib === 'mci' ? MaterialCommunityIcons : Ionicons;
   const isOn = state === 'on';
@@ -225,7 +225,7 @@ function ActuatorControl({ label, iconName, iconLib, mode, state, onManualOn, on
   );
 }
 
-// ── Sensor Chart ──────────────────────────────────────────────────────────────
+// Sensor Chart
 function SensorChart({ title, data, labels, color, unit, theme, chartWidth }) {
   if (!data || data.length === 0) {
     return (
@@ -243,19 +243,19 @@ function SensorChart({ title, data, labels, color, unit, theme, chartWidth }) {
       <Text style={[styles.sectionTitle, { color: theme.text }]}>{title}</Text>
       <LineChart
         data={{
-          labels:   labels.slice(-10),
+          labels: labels.slice(-10),
           datasets: [{ data: data.slice(-10), color: () => color, strokeWidth: 2 }],
         }}
         width={chartWidth}
         height={220}
         yAxisSuffix={unit}
         chartConfig={{
-          backgroundGradientFrom:  theme.chartBg,
-          backgroundGradientTo:    theme.chartBg,
-          decimalPlaces:           1,
-          color:                   () => color,
-          labelColor:              () => theme.textSecondary,
-          propsForDots:            { r: '4', strokeWidth: '2', stroke: color },
+          backgroundGradientFrom: theme.chartBg,
+          backgroundGradientTo: theme.chartBg,
+          decimalPlaces: 1,
+          color: () => color,
+          labelColor: () => theme.textSecondary,
+          propsForDots: { r: '4', strokeWidth: '2', stroke: color },
           propsForBackgroundLines: { stroke: theme.cardBorder },
         }}
         bezier
@@ -266,7 +266,7 @@ function SensorChart({ title, data, labels, color, unit, theme, chartWidth }) {
   );
 }
 
-// ── Data Table ────────────────────────────────────────────────────────────────
+// Data Table
 function DataTable({ title, iconName, columns, rows, theme }) {
   return (
     <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
@@ -307,99 +307,139 @@ function DataTable({ title, iconName, columns, rows, theme }) {
   );
 }
 
-// ── Main Screen ───────────────────────────────────────────────────────────────
+// Main Screen ───────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const { theme }    = useTheme();
-  const { width }    = useWindowDimensions();
-  const isWide       = width >= 768;
-  const isVeryWide   = width >= 1100;
-  const chartWidth   = isWide
+  const { theme } = useTheme();
+  const { width } = useWindowDimensions();
+  const isWide = width >= 768;
+  const isVeryWide = width >= 1100;
+  const chartWidth = isWide
     ? (isVeryWide ? (width - 320) / 2 - 32 : (width - 80) / 2 - 20)
     : width - 48;
 
-  const [refreshing,    setRefreshing]    = useState(false);
-  const [loading,       setLoading]       = useState(true);
-  const [serialOk,      setSerialOk]      = useState(false);
-  const [tempLatest,    setTempLatest]    = useState(null);
-  const [uvLatest,      setUvLatest]      = useState(null);
-  const [fanLatest,     setFanLatest]     = useState(null);
-  const [buzzerLatest,  setBuzzerLatest]  = useState(null);
-  const [tempHistory,   setTempHistory]   = useState([]);
-  const [uvHistory,     setUvHistory]     = useState([]);
-  const [fanHistory,    setFanHistory]    = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  // Live state (from /api/sensors/live — in-memory MQTT snapshot)
+  const [liveState, setLiveState] = useState(null);
+
+  // Rolling graph data (accumulated from live polling)
+  const [liveTemp, setLiveTemp] = useState([]);
+  const [liveTempLbl, setLiveTempLbl] = useState([]);
+  const [liveUV, setLiveUV] = useState([]);
+  const [liveUVLbl, setLiveUVLbl] = useState([]);
+
+  // DB history (for data tables only)
+  const [tempHistory, setTempHistory] = useState([]);
+  const [uvHistory, setUvHistory] = useState([]);
+  const [fanHistory, setFanHistory] = useState([]);
   const [buzzerHistory, setBuzzerHistory] = useState([]);
 
-  const fetchAll = useCallback(async () => {
+  // Poll /api/sensors/live at LIVE_MS — drives cards, actuator badges, rolling graph
+  const fetchLive = useCallback(async () => {
     try {
-      const [tl, ul, fl, bl, th, uh, fh, bh, ss] = await Promise.allSettled([
-        apiFetch('/api/temperature/latest'),
-        apiFetch('/api/uv/latest'),
-        apiFetch('/api/fan/latest'),
-        apiFetch('/api/buzzer/latest'),
-        apiFetch('/api/temperature/history'),
-        apiFetch('/api/uv/history'),
-        apiFetch('/api/fan/history'),
-        apiFetch('/api/buzzer/history'),
-        apiFetch('/api/serial/status'),
-      ]);
-      if (tl.status === 'fulfilled') setTempLatest(tl.value);
-      if (ul.status === 'fulfilled') setUvLatest(ul.value);
-      if (fl.status === 'fulfilled') setFanLatest(fl.value);
-      if (bl.status === 'fulfilled') setBuzzerLatest(bl.value);
-      if (th.status === 'fulfilled') setTempHistory(Array.isArray(th.value) ? [...th.value].reverse() : []);
-      if (uh.status === 'fulfilled') setUvHistory(Array.isArray(uh.value) ? [...uh.value].reverse() : []);
-      if (fh.status === 'fulfilled') setFanHistory(Array.isArray(fh.value) ? [...fh.value].reverse() : []);
-      if (bh.status === 'fulfilled') setBuzzerHistory(Array.isArray(bh.value) ? [...bh.value].reverse() : []);
-      if (ss.status === 'fulfilled') setSerialOk(ss.value?.connected === true);
+      const data = await apiFetch('/api/sensors/live');
+      setLiveState(data);
+      if (data.last_updated) {
+        const label = formatTs(data.last_updated).slice(0, 5);
+        if (data.temperature != null) {
+          setLiveTemp((prev) => {
+            const next = [...prev, data.temperature];
+            return next.slice(-MAX_LIVE_PTS);
+          });
+          setLiveTempLbl((prev) => {
+            const next = [...prev, label];
+            return next.slice(-MAX_LIVE_PTS);
+          });
+        }
+        if (data.uv_index != null) {
+          setLiveUV((prev) => {
+            const next = [...prev, data.uv_index];
+            return next.slice(-MAX_LIVE_PTS);
+          });
+          setLiveUVLbl((prev) => {
+            const next = [...prev, label];
+            return next.slice(-MAX_LIVE_PTS);
+          });
+        }
+      }
     } catch (e) {
-      console.error('fetchAll error', e);
+      console.error('fetchLive error', e);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Poll DB history at HISTORY_MS — drives data tables only
+  const fetchHistory = useCallback(async () => {
+    try {
+      const [th, uh, fh, bh] = await Promise.allSettled([
+        apiFetch('/api/temperature/history'),
+        apiFetch('/api/uv/history'),
+        apiFetch('/api/fan/history'),
+        apiFetch('/api/buzzer/history'),
+      ]);
+      if (th.status === 'fulfilled') setTempHistory(Array.isArray(th.value) ? [...th.value].reverse() : []);
+      if (uh.status === 'fulfilled') setUvHistory(Array.isArray(uh.value) ? [...uh.value].reverse() : []);
+      if (fh.status === 'fulfilled') setFanHistory(Array.isArray(fh.value) ? [...fh.value].reverse() : []);
+      if (bh.status === 'fulfilled') setBuzzerHistory(Array.isArray(bh.value) ? [...bh.value].reverse() : []);
+    } catch (e) {
+      console.error('fetchHistory error', e);
+    }
+  }, []);
+
   useEffect(() => {
-    fetchAll();
-    const timer = setInterval(fetchAll, POLL_MS);
-    return () => clearInterval(timer);
-  }, [fetchAll]);
+    fetchLive();
+    fetchHistory();
+    const liveTimer = setInterval(fetchLive, LIVE_MS);
+    const historyTimer = setInterval(fetchHistory, HISTORY_MS);
+    return () => { clearInterval(liveTimer); clearInterval(historyTimer); };
+  }, [fetchLive, fetchHistory]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchAll();
+    await Promise.allSettled([fetchLive(), fetchHistory()]);
     setRefreshing(false);
-  }, [fetchAll]);
+  }, [fetchLive, fetchHistory]);
 
   const controlFan = async (mode, state = 'off') => {
     try {
       const r = await apiPost('/api/fan/control', { mode, state });
-      setFanLatest({ state: r.state, mode: r.mode, timestamp: new Date().toISOString() });
+      // Optimistically update liveState so the badge flips instantly
+      setLiveState((prev) => prev
+        ? { ...prev, fan: state === 'on', fan_auto: mode === 'automatic' }
+        : prev);
+      // Refresh history table
+      fetchHistory();
     } catch (e) { console.error('Fan error', e); }
   };
 
   const controlBuzzer = async (mode, state = 'off') => {
     try {
       const r = await apiPost('/api/buzzer/control', { mode, state });
-      setBuzzerLatest({ state: r.state, mode: r.mode, timestamp: new Date().toISOString() });
+      setLiveState((prev) => prev
+        ? { ...prev, buzzer: state === 'on', buzzer_auto: mode === 'automatic' }
+        : prev);
+      fetchHistory();
     } catch (e) { console.error('Buzzer error', e); }
   };
 
-  // Chart data
-  const tempVals   = tempHistory.map((r) => r.value    || 0);
-  const tempLabels = tempHistory.map((r) => formatTs(r.timestamp).slice(0, 5));
-  const uvVals     = uvHistory.map((r)   => r.uv_index || 0);
-  const uvLabels   = uvHistory.map((r)   => formatTs(r.timestamp).slice(0, 5));
+  // Chart data — rolling live points
+  const tempVals = liveTemp.length > 0 ? liveTemp : tempHistory.slice(-MAX_LIVE_PTS).map((r) => r.value || 0);
+  const tempLabels = liveTempLbl.length > 0 ? liveTempLbl : tempHistory.slice(-MAX_LIVE_PTS).map((r) => formatTs(r.timestamp).slice(0, 5));
+  const uvVals = liveUV.length > 0 ? liveUV : uvHistory.slice(-MAX_LIVE_PTS).map((r) => r.uv_index || 0);
+  const uvLabels = liveUVLbl.length > 0 ? liveUVLbl : uvHistory.slice(-MAX_LIVE_PTS).map((r) => formatTs(r.timestamp).slice(0, 5));
 
   // Table definitions
   const tempCols = [
-    { key: 'timestamp', label: 'Timestamp',   width: 160 },
-    { key: 'value',     label: 'Temp (°C)',    width: 100 },
-    { key: 'humidity',  label: 'Humidity (%)', width: 110 },
+    { key: 'timestamp', label: 'Timestamp', width: 160 },
+    { key: 'value', label: 'Temp (°C)', width: 100 },
+    { key: 'humidity', label: 'Humidity (%)', width: 110 },
   ];
   const uvCols = [
-    { key: 'timestamp', label: 'Timestamp',  width: 160 },
-    { key: 'value',     label: 'Raw ADC',    width: 100 },
-    { key: 'uv_index',  label: 'UV Index',   width: 100 },
+    { key: 'timestamp', label: 'Timestamp', width: 160 },
+    { key: 'value', label: 'Raw ADC', width: 100 },
+    { key: 'uv_index', label: 'UV Index', width: 100 },
   ];
   const actuatorCols = [
     { key: 'timestamp', label: 'Timestamp', width: 160 },
@@ -413,9 +453,9 @@ export default function Dashboard() {
     },
   ];
 
-  const tempTableRows   = tempHistory.slice(-20).map((r) => ({ ...r, timestamp: formatTs(r.timestamp) }));
-  const uvTableRows     = uvHistory.slice(-20).map((r)   => ({ ...r, timestamp: formatTs(r.timestamp) }));
-  const fanTableRows    = fanHistory.slice(-20).map((r)  => ({ ...r, timestamp: formatTs(r.timestamp) }));
+  const tempTableRows = tempHistory.slice(-20).map((r) => ({ ...r, timestamp: formatTs(r.timestamp) }));
+  const uvTableRows = uvHistory.slice(-20).map((r) => ({ ...r, timestamp: formatTs(r.timestamp) }));
+  const fanTableRows = fanHistory.slice(-20).map((r) => ({ ...r, timestamp: formatTs(r.timestamp) }));
   const buzzerTableRows = buzzerHistory.slice(-20).map((r) => ({ ...r, timestamp: formatTs(r.timestamp) }));
 
   if (loading) {
@@ -429,10 +469,12 @@ export default function Dashboard() {
     );
   }
 
-  const fanMode    = fanLatest?.mode    || 'automatic';
-  const fanState   = fanLatest?.state   || 'off';
-  const buzzerMode  = buzzerLatest?.mode  || 'automatic';
-  const buzzerState = buzzerLatest?.state || 'off';
+  // Actuator state driven from live MQTT snapshot
+  const fanMode = liveState?.fan_auto === false ? 'manual' : 'automatic';
+  const fanState = liveState?.fan ? 'on' : 'off';
+  const buzzerMode = liveState?.buzzer_auto === false ? 'manual' : 'automatic';
+  const buzzerState = liveState?.buzzer ? 'on' : 'off';
+  const mqttOk = liveState?.connected === true;
 
   return (
     <ScrollView
@@ -443,16 +485,17 @@ export default function Dashboard() {
       {/* Connection status banner */}
       <View style={[
         styles.statusBar,
-        { backgroundColor: serialOk ? theme.successLight : theme.dangerLight },
+        { backgroundColor: mqttOk ? theme.successLight : theme.dangerLight },
       ]}>
         <Ionicons
-          name={serialOk ? 'hardware-chip-outline' : 'warning-outline'}
+          name={mqttOk ? 'hardware-chip-outline' : 'warning-outline'}
           size={16}
-          color={serialOk ? theme.success : theme.danger}
+          color={mqttOk ? theme.success : theme.danger}
           style={{ marginRight: 8 }}
         />
-        <Text style={[styles.statusText, { color: serialOk ? theme.success : theme.danger }]}>
-          ESP32 {serialOk ? 'Connected via USB Serial' : 'Disconnected — check serial port'}
+        <Text style={[styles.statusText, { color: mqttOk ? theme.success : theme.danger }]}>
+          ESP32 {mqttOk ? 'Connected via MQTT' : 'Disconnected — check MQTT broker'}
+          {liveState?.last_updated ? `  ·  Last: ${formatTs(liveState.last_updated)}` : ''}
         </Text>
       </View>
 
@@ -468,27 +511,27 @@ export default function Dashboard() {
         <SensorCard
           label="Temperature"
           iconName="thermometer-outline"
-          value={tempLatest?.value?.toFixed(1)}
+          value={liveState?.temperature != null ? liveState.temperature.toFixed(1) : '—'}
           unit="°C"
           subLabel="Humidity"
-          subValue={tempLatest?.humidity != null ? `${tempLatest.humidity.toFixed(1)} %` : null}
+          subValue={liveState?.humidity != null ? `${liveState.humidity.toFixed(1)} %` : null}
           color={theme.warning}
           theme={theme}
         />
         <SensorCard
           label="UV Index"
           iconName="sunny-outline"
-          value={uvLatest?.uv_index?.toFixed(2)}
+          value={liveState?.uv_index != null ? liveState.uv_index.toFixed(2) : '—'}
           unit=""
-          subLabel="Raw ADC"
-          subValue={uvLatest?.value}
+          subLabel="via MQTT"
+          subValue={liveState?.last_updated ? formatTs(liveState.last_updated) : '—'}
           color={theme.accent}
           theme={theme}
         />
         <SensorCard
           label="Humidity"
           iconName="water-outline"
-          value={tempLatest?.humidity?.toFixed(1)}
+          value={liveState?.humidity != null ? liveState.humidity.toFixed(1) : '—'}
           unit="%"
           subLabel="Sensor"
           subValue="DHT11"
@@ -509,8 +552,8 @@ export default function Dashboard() {
           iconLib="mci"
           mode={fanMode}
           state={fanState}
-          onAuto={()      => controlFan('automatic')}
-          onManualOn={()  => controlFan('manual', 'on')}
+          onAuto={() => controlFan('automatic')}
+          onManualOn={() => controlFan('manual', 'on')}
           onManualOff={() => controlFan('manual', 'off')}
           theme={theme}
         />
@@ -519,8 +562,8 @@ export default function Dashboard() {
           iconName="notifications-outline"
           mode={buzzerMode}
           state={buzzerState}
-          onAuto={()      => controlBuzzer('automatic')}
-          onManualOn={()  => controlBuzzer('manual', 'on')}
+          onAuto={() => controlBuzzer('automatic')}
+          onManualOn={() => controlBuzzer('manual', 'on')}
           onManualOff={() => controlBuzzer('manual', 'off')}
           theme={theme}
         />
@@ -597,120 +640,120 @@ export default function Dashboard() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  root:         { flex: 1 },
-  content:      { padding: 16, paddingTop: 8 },
-  contentWide:  { paddingHorizontal: 24 },
-  center:       { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  root: { flex: 1 },
+  content: { padding: 16, paddingTop: 8 },
+  contentWide: { paddingHorizontal: 24 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
   statusBar: {
     flexDirection: 'row',
-    alignItems:   'center',
-    borderRadius:  10,
-    padding:       12,
-    marginBottom:  12,
+    alignItems: 'center',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 12,
   },
   statusText: { fontSize: 13, fontWeight: '600' },
 
   sectionHeaderRow: {
     flexDirection: 'row',
-    alignItems:   'center',
-    marginTop:     16,
-    marginBottom:  10,
+    alignItems: 'center',
+    marginTop: 16,
+    marginBottom: 10,
   },
   sectionHeader: {
-    fontSize:   16,
+    fontSize: 16,
     fontWeight: '700',
   },
 
   // Row that becomes a flex-row on wide screens
-  row:    { flexDirection: 'column', gap: 12, marginBottom: 4 },
-  rowWide: { flexDirection: 'row',   alignItems: 'flex-start', flexWrap: 'wrap' },
+  row: { flexDirection: 'column', gap: 12, marginBottom: 4 },
+  rowWide: { flexDirection: 'row', alignItems: 'flex-start', flexWrap: 'wrap' },
 
   // Card shared base
   card: {
-    flex:            1,
-    minWidth:        260,
-    borderRadius:    16,
-    padding:         16,
-    marginBottom:    12,
-    borderWidth:     1,
-    shadowColor:    '#000',
-    shadowOffset:   { width: 0, height: 2 },
-    shadowOpacity:   0.06,
-    shadowRadius:    8,
-    elevation:       2,
+    flex: 1,
+    minWidth: 260,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
 
   // Sensor card
   cardHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  cardLabel:     { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.8 },
-  cardValueRow:  { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 4 },
-  cardValue:     { fontSize: 38, fontWeight: '800', lineHeight: 44 },
-  cardUnit:      { fontSize: 16, fontWeight: '600', marginBottom: 6, marginLeft: 4 },
-  cardSub:       { fontSize: 12 },
+  cardLabel: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.8 },
+  cardValueRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 4 },
+  cardValue: { fontSize: 38, fontWeight: '800', lineHeight: 44 },
+  cardUnit: { fontSize: 16, fontWeight: '600', marginBottom: 6, marginLeft: 4 },
+  cardSub: { fontSize: 12 },
 
   // Actuator card
   actuatorCard: {
-    flex:         1,
-    minWidth:     260,
+    flex: 1,
+    minWidth: 260,
     borderRadius: 16,
-    padding:      16,
+    padding: 16,
     marginBottom: 12,
-    borderWidth:  1,
-    shadowColor:  '#000',
+    borderWidth: 1,
+    shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06,
     shadowRadius: 8,
-    elevation:    2,
+    elevation: 2,
   },
-  actuatorHeader:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  actuatorHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   actuatorTitleRow: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  actuatorLabel:    { fontSize: 14, fontWeight: '700' },
-  modeBadge:        { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
-  modeBadgeText:    { fontSize: 10, fontWeight: '700', letterSpacing: 0.6 },
-  stateIndicator:   { flexDirection: 'row', alignItems: 'center', borderRadius: 8, padding: 8, marginBottom: 12 },
-  stateCircle:      { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
-  stateText:        { fontSize: 13, fontWeight: '700' },
-  actuatorBtns:     { flexDirection: 'row', gap: 8 },
+  actuatorLabel: { fontSize: 14, fontWeight: '700' },
+  modeBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
+  modeBadgeText: { fontSize: 10, fontWeight: '700', letterSpacing: 0.6 },
+  stateIndicator: { flexDirection: 'row', alignItems: 'center', borderRadius: 8, padding: 8, marginBottom: 12 },
+  stateCircle: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
+  stateText: { fontSize: 13, fontWeight: '700' },
+  actuatorBtns: { flexDirection: 'row', gap: 8 },
   ctrlBtn: {
-    flex:           1,
-    borderRadius:   8,
+    flex: 1,
+    borderRadius: 8,
     paddingVertical: 8,
-    alignItems:     'center',
-    borderWidth:    1.5,
+    alignItems: 'center',
+    borderWidth: 1.5,
   },
   ctrlBtnText: { fontSize: 11, fontWeight: '700' },
 
   // Chart / table shared
-  sectionTitle:    { fontSize: 14, fontWeight: '700', marginBottom: 12 },
-  tableTitleRow:   { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  emptyState:      { alignItems: 'center', paddingVertical: 24, gap: 8 },
-  emptyText:       { fontSize: 13, textAlign: 'center' },
-  tableRow:        { flexDirection: 'row', paddingVertical: 10, borderBottomWidth: 1 },
-  tableCell:       { paddingHorizontal: 10, justifyContent: 'center' },
+  sectionTitle: { fontSize: 14, fontWeight: '700', marginBottom: 12 },
+  tableTitleRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  emptyState: { alignItems: 'center', paddingVertical: 24, gap: 8 },
+  emptyText: { fontSize: 13, textAlign: 'center' },
+  tableRow: { flexDirection: 'row', paddingVertical: 10, borderBottomWidth: 1 },
+  tableCell: { paddingHorizontal: 10, justifyContent: 'center' },
   tableHeaderText: { fontSize: 11, fontWeight: '700' },
-  tableCellText:   { fontSize: 11 },
+  tableCellText: { fontSize: 11 },
 
   // Info banner
   infoBanner: {
-    borderRadius:  14,
-    borderWidth:   1,
-    marginBottom:  16,
-    overflow:      'hidden',
+    borderRadius: 14,
+    borderWidth: 1,
+    marginBottom: 16,
+    overflow: 'hidden',
   },
   infoBannerHeader: {
-    flexDirection:  'row',
+    flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems:     'center',
-    padding:        14,
+    alignItems: 'center',
+    padding: 14,
   },
   infoBannerTitleRow: { flexDirection: 'row', alignItems: 'center' },
-  infoBannerTitle:    { fontSize: 14, fontWeight: '700' },
-  infoBannerBody:     { paddingHorizontal: 14, paddingBottom: 14 },
-  infoBannerText:     { fontSize: 13, lineHeight: 20, marginBottom: 12 },
-  infoRow:    { flexDirection: 'row', marginBottom: 10 },
-  infoIcon:   { marginRight: 8, marginTop: 2 },
-  infoLabel:  { fontSize: 13, fontWeight: '700', marginBottom: 3 },
-  infoDesc:   { fontSize: 12, lineHeight: 18 },
+  infoBannerTitle: { fontSize: 14, fontWeight: '700' },
+  infoBannerBody: { paddingHorizontal: 14, paddingBottom: 14 },
+  infoBannerText: { fontSize: 13, lineHeight: 20, marginBottom: 12 },
+  infoRow: { flexDirection: 'row', marginBottom: 10 },
+  infoIcon: { marginRight: 8, marginTop: 2 },
+  infoLabel: { fontSize: 13, fontWeight: '700', marginBottom: 3 },
+  infoDesc: { fontSize: 12, lineHeight: 18 },
   infoDivider: { borderTopWidth: 1, marginVertical: 10 },
 });

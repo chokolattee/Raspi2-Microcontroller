@@ -7,8 +7,10 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.1.100:8000'; // ← Update to your PC's local IP
-const POLL_MS = 2000;
+const BASE_URL = 'http://192.168.0.102:8000';
+const LIVE_MS = 3000;
+const HISTORY_MS = 10000;
+const MAX_LIVE_PTS = 20;
 
 // WHO UV Index classification
 const UV_LEVELS = [
@@ -104,7 +106,8 @@ function SensorInfo({ theme }) {
           <Ionicons name="hand-left-outline" size={14} color={theme.warning} style={{ marginRight: 6 }} />
           <Text style={[styles.logicText, { color: theme.text }]}>
             Manual mode overrides automatic until "Automatic" is pressed again, which sends{' '}
-            <Text style={styles.mono}>BUZZER:AUTO</Text> via serial
+            <Text style={styles.mono}>AUTO</Text> via MQTT to{' '}
+            <Text style={styles.mono}>esp32/buzzer/cmd</Text>
           </Text>
         </View>
       </View>
@@ -268,43 +271,65 @@ export default function UVScreen() {
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [uvLatest, setUvLatest] = useState(null);
-  const [buzzerLatest, setBuzzerLatest] = useState(null);
+
+  // Live snapshot from MQTT (drives hero card + buzzer state)
+  const [liveState, setLiveState] = useState(null);
+
+  // Rolling graph arrays
+  const [liveUV, setLiveUV] = useState([]);
+  const [liveUVLbl, setLiveUVLbl] = useState([]);
+
+  // DB history (for table only)
   const [uvHistory, setUvHistory] = useState([]);
   const [buzzerHistory, setBuzzerHistory] = useState([]);
 
-  const fetchAll = useCallback(async () => {
+  const fetchLive = useCallback(async () => {
     try {
-      const [ul, bl, uh, bh] = await Promise.allSettled([
-        apiFetch('/api/uv/latest'),
-        apiFetch('/api/buzzer/latest'),
-        apiFetch('/api/uv/history'),
-        apiFetch('/api/buzzer/history'),
-      ]);
-      if (ul.status === 'fulfilled') setUvLatest(ul.value);
-      if (bl.status === 'fulfilled') setBuzzerLatest(bl.value);
-      if (uh.status === 'fulfilled') setUvHistory(Array.isArray(uh.value) ? [...uh.value].reverse() : []);
-      if (bh.status === 'fulfilled') setBuzzerHistory(Array.isArray(bh.value) ? [...bh.value].reverse() : []);
+      const data = await apiFetch('/api/sensors/live');
+      setLiveState(data);
+      if (data.last_updated && data.uv_index != null) {
+        const label = new Date(data.last_updated).toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit',
+        });
+        setLiveUV((p) => [...p, data.uv_index].slice(-MAX_LIVE_PTS));
+        setLiveUVLbl((p) => [...p, label].slice(-MAX_LIVE_PTS));
+      }
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
 
+  const fetchHistory = useCallback(async () => {
+    try {
+      const [uh, bh] = await Promise.allSettled([
+        apiFetch('/api/uv/history'),
+        apiFetch('/api/buzzer/history'),
+      ]);
+      if (uh.status === 'fulfilled') setUvHistory(Array.isArray(uh.value) ? [...uh.value].reverse() : []);
+      if (bh.status === 'fulfilled') setBuzzerHistory(Array.isArray(bh.value) ? [...bh.value].reverse() : []);
+    } catch (e) { console.error(e); }
+  }, []);
+
   useEffect(() => {
-    fetchAll();
-    const t = setInterval(fetchAll, POLL_MS);
-    return () => clearInterval(t);
-  }, [fetchAll]);
+    fetchLive();
+    fetchHistory();
+    const t1 = setInterval(fetchLive, LIVE_MS);
+    const t2 = setInterval(fetchHistory, HISTORY_MS);
+    return () => { clearInterval(t1); clearInterval(t2); };
+  }, [fetchLive, fetchHistory]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchAll();
+    await Promise.allSettled([fetchLive(), fetchHistory()]);
     setRefreshing(false);
-  }, [fetchAll]);
+  }, [fetchLive, fetchHistory]);
 
   const controlBuzzer = async (mode, state = 'off') => {
     try {
-      const r = await apiPost('/api/buzzer/control', { mode, state });
-      setBuzzerLatest({ state: r.state, mode: r.mode, timestamp: new Date().toISOString() });
+      await apiPost('/api/buzzer/control', { mode, state });
+      setLiveState((prev) => prev
+        ? { ...prev, buzzer: state === 'on', buzzer_auto: mode === 'automatic' }
+        : prev);
+      fetchHistory();
     } catch (e) { console.error(e); }
   };
 
@@ -316,17 +341,21 @@ export default function UVScreen() {
     );
   }
 
-  const uvIndex = uvLatest?.uv_index || 0;
-  const uvRaw = uvLatest?.value;
+  const uvIndex = liveState?.uv_index ?? 0;
+  // Reconstruct raw ADC from uv_index (back-calculate for display)
+  const uvRaw = liveState?.uv_index != null
+    ? Math.round((liveState.uv_index * 100.0 / 3300.0) * 4095.0)
+    : null;
   const level = getUVLevel(uvIndex);
-  const buzzerMode = buzzerLatest?.mode || 'automatic';
-  const buzzerState = buzzerLatest?.state || 'off';
+  const buzzerMode = liveState?.buzzer_auto === false ? 'manual' : 'automatic';
+  const buzzerState = liveState?.buzzer ? 'on' : 'off';
+  const lastUpdated = liveState?.last_updated;
 
-  // Chart data
-  const uvVals = uvHistory.map((r) => r.uv_index || 0);
-  const uvLabels = uvHistory.map((r) => formatTs(r.timestamp).slice(0, 5));
+  // Chart data — prefer live rolling points; fall back to DB history on first load
+  const uvVals = liveUV.length > 0 ? liveUV : uvHistory.slice(-MAX_LIVE_PTS).map((r) => r.uv_index || 0);
+  const uvLabels = liveUVLbl.length > 0 ? liveUVLbl : uvHistory.slice(-MAX_LIVE_PTS).map((r) => formatTs(r.timestamp).slice(0, 5));
 
-  // Combined table rows (pair UV reading with nearest buzzer log)
+  // Table rows from DB history
   const tableRows = uvHistory.slice(-20).map((r, i) => ({
     id: r.id || i,
     timestamp: formatTs(r.timestamp),
@@ -369,8 +398,13 @@ export default function UVScreen() {
         <View style={styles.heroCardHeader}>
           <MaterialCommunityIcons name="weather-sunny" size={18} color={theme.textMuted} style={{ marginRight: 6 }} />
           <Text style={[styles.heroLabel, { color: theme.textMuted }]}>
-            GUVA-S12SD — Live Reading
+            GUVA-S12SD — Live Reading via MQTT
           </Text>
+          {lastUpdated ? (
+            <Text style={{ color: theme.textMuted, fontSize: 11, marginLeft: 'auto' }}>
+              {formatTs(lastUpdated)}
+            </Text>
+          ) : null}
         </View>
 
         <View style={[styles.heroBody, isWide && styles.heroBodyWide]}>
@@ -392,7 +426,7 @@ export default function UVScreen() {
             <View style={[styles.statBox, { backgroundColor: theme.primaryLight, flex: isWide ? 1 : undefined, minWidth: 110 }]}>
               <View style={styles.statBoxHeader}>
                 <Ionicons name="pulse-outline" size={13} color={theme.primary} style={{ marginRight: 4 }} />
-                <Text style={[styles.statLabel, { color: theme.primary }]}>Raw ADC</Text>
+                <Text style={[styles.statLabel, { color: theme.primary }]}>Raw ADC (est.)</Text>
               </View>
               <Text style={[styles.statValue, { color: theme.primary }]}>
                 {uvRaw ?? '—'}
@@ -403,10 +437,10 @@ export default function UVScreen() {
             <View style={[styles.statBox, { backgroundColor: theme.accentLight, flex: isWide ? 1 : undefined, minWidth: 110 }]}>
               <View style={styles.statBoxHeader}>
                 <Ionicons name="flash-outline" size={13} color={theme.accent} style={{ marginRight: 4 }} />
-                <Text style={[styles.statLabel, { color: theme.accent }]}>Voltage (mV)</Text>
+                <Text style={[styles.statLabel, { color: theme.accent }]}>Voltage (mV est.)</Text>
               </View>
               <Text style={[styles.statValue, { color: theme.accent }]}>
-                {uvRaw != null ? ((uvRaw / 4095) * 3300).toFixed(0) : '—'}
+                {uvRaw != null ? ((uvRaw / 4095) * 3300).toFixed(0) : liveState?.uv_index != null ? (liveState.uv_index * 100).toFixed(0) : '—'}
               </Text>
             </View>
 
