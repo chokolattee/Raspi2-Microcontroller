@@ -7,7 +7,7 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.0.102:8000'; // Windows machine running Flask
+const BASE_URL = process.env.EXPO_PUBLIC_BASE_URL;
 const LIVE_MS = 3000;   // poll /api/sensors/live
 const HISTORY_MS = 10000;  // poll DB history for tables
 const MAX_LIVE_PTS = 20;    // max rolling graph points
@@ -23,8 +23,11 @@ function formatTs(ts) {
   } catch { return ts; }
 }
 
+// Shared headers: bypass ngrok browser-warning interstitial on free tunnels
+const NGROK_HEADERS = { 'ngrok-skip-browser-warning': '1' };
+
 async function apiFetch(path) {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const res = await fetch(`${BASE_URL}${path}`, { headers: NGROK_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -32,7 +35,7 @@ async function apiFetch(path) {
 async function apiPost(path, body) {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...NGROK_HEADERS },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -199,10 +202,9 @@ function ActuatorControl({ label, iconName, iconLib, mode, state, onManualOn, on
           style={[styles.ctrlBtn, {
             backgroundColor: !isAuto && isOn ? theme.success : theme.successLight,
             borderColor: theme.success,
-            opacity: isAuto ? 0.4 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOn}
-          disabled={isAuto}
         >
           <Ionicons name="power" size={14} color={!isAuto && isOn ? '#fff' : theme.success} style={{ marginBottom: 2 }} />
           <Text style={[styles.ctrlBtnText, { color: !isAuto && isOn ? '#fff' : theme.success }]}>ON</Text>
@@ -212,10 +214,9 @@ function ActuatorControl({ label, iconName, iconLib, mode, state, onManualOn, on
           style={[styles.ctrlBtn, {
             backgroundColor: !isAuto && !isOn ? theme.danger : theme.dangerLight,
             borderColor: theme.danger,
-            opacity: isAuto ? 0.4 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOff}
-          disabled={isAuto}
         >
           <Ionicons name="power-outline" size={14} color={!isAuto && !isOn ? '#fff' : theme.danger} style={{ marginBottom: 2 }} />
           <Text style={[styles.ctrlBtnText, { color: !isAuto && !isOn ? '#fff' : theme.danger }]}>OFF</Text>
@@ -319,9 +320,16 @@ export default function Dashboard() {
 
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const retryCount = React.useRef(0);
 
   // Live state (from /api/sensors/live — in-memory MQTT snapshot)
   const [liveState, setLiveState] = useState(null);
+
+  // Local overrides — held for OVERRIDE_TTL ms after a button press so that
+  // the periodic fetchLive() poll does not immediately revert the UI.
+  // Shape: { fan_auto, fan, buzzer_auto, buzzer, ts } | null
+  const OVERRIDE_TTL = 8000; // ms (> ESP32 5 s publish interval)
+  const [localOverride, setLocalOverride] = useState(null);
 
   // Rolling graph data (accumulated from live polling)
   const [liveTemp, setLiveTemp] = useState([]);
@@ -339,6 +347,7 @@ export default function Dashboard() {
   const fetchLive = useCallback(async () => {
     try {
       const data = await apiFetch('/api/sensors/live');
+      retryCount.current = 0; // reset on success
       setLiveState(data);
       if (data.last_updated) {
         const label = formatTs(data.last_updated).slice(0, 5);
@@ -364,7 +373,11 @@ export default function Dashboard() {
         }
       }
     } catch (e) {
-      console.error('fetchLive error', e);
+      retryCount.current += 1;
+      // Only log after a few failures to avoid spam on initial mount
+      if (retryCount.current >= 3) {
+        console.warn(`fetchLive: backend unreachable (attempt ${retryCount.current}) — retrying…`);
+      }
     } finally {
       setLoading(false);
     }
@@ -389,11 +402,16 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    // Small stagger so fetchLive fires before all 4 history requests pile up
     fetchLive();
-    fetchHistory();
+    const historyDelay = setTimeout(fetchHistory, 500);
     const liveTimer = setInterval(fetchLive, LIVE_MS);
     const historyTimer = setInterval(fetchHistory, HISTORY_MS);
-    return () => { clearInterval(liveTimer); clearInterval(historyTimer); };
+    return () => {
+      clearTimeout(historyDelay);
+      clearInterval(liveTimer);
+      clearInterval(historyTimer);
+    };
   }, [fetchLive, fetchHistory]);
 
   const onRefresh = useCallback(async () => {
@@ -404,22 +422,27 @@ export default function Dashboard() {
 
   const controlFan = async (mode, state = 'off') => {
     try {
-      const r = await apiPost('/api/fan/control', { mode, state });
-      // Optimistically update liveState so the badge flips instantly
-      setLiveState((prev) => prev
-        ? { ...prev, fan: state === 'on', fan_auto: mode === 'automatic' }
-        : prev);
-      // Refresh history table
+      await apiPost('/api/fan/control', { mode, state });
+      // Set a local override that survives the next fetchLive() poll
+      setLocalOverride((prev) => ({
+        ...(prev || {}),
+        fan_auto: mode === 'automatic',
+        fan: state === 'on',
+        ts: Date.now(),
+      }));
       fetchHistory();
     } catch (e) { console.error('Fan error', e); }
   };
 
   const controlBuzzer = async (mode, state = 'off') => {
     try {
-      const r = await apiPost('/api/buzzer/control', { mode, state });
-      setLiveState((prev) => prev
-        ? { ...prev, buzzer: state === 'on', buzzer_auto: mode === 'automatic' }
-        : prev);
+      await apiPost('/api/buzzer/control', { mode, state });
+      setLocalOverride((prev) => ({
+        ...(prev || {}),
+        buzzer_auto: mode === 'automatic',
+        buzzer: state === 'on',
+        ts: Date.now(),
+      }));
       fetchHistory();
     } catch (e) { console.error('Buzzer error', e); }
   };
@@ -469,11 +492,17 @@ export default function Dashboard() {
     );
   }
 
-  // Actuator state driven from live MQTT snapshot
-  const fanMode = liveState?.fan_auto === false ? 'manual' : 'automatic';
-  const fanState = liveState?.fan ? 'on' : 'off';
-  const buzzerMode = liveState?.buzzer_auto === false ? 'manual' : 'automatic';
-  const buzzerState = liveState?.buzzer ? 'on' : 'off';
+  // Actuator state: merge live MQTT snapshot with any active local override
+  const overrideActive = localOverride && (Date.now() - localOverride.ts) < OVERRIDE_TTL;
+  const effectiveFanAuto    = overrideActive && localOverride.fan_auto    !== undefined ? localOverride.fan_auto    : liveState?.fan_auto;
+  const effectiveFanOn      = overrideActive && localOverride.fan         !== undefined ? localOverride.fan         : liveState?.fan;
+  const effectiveBuzzerAuto = overrideActive && localOverride.buzzer_auto !== undefined ? localOverride.buzzer_auto : liveState?.buzzer_auto;
+  const effectiveBuzzerOn   = overrideActive && localOverride.buzzer      !== undefined ? localOverride.buzzer      : liveState?.buzzer;
+
+  const fanMode     = effectiveFanAuto    === false ? 'manual' : 'automatic';
+  const fanState    = effectiveFanOn      ? 'on' : 'off';
+  const buzzerMode  = effectiveBuzzerAuto === false ? 'manual' : 'automatic';
+  const buzzerState = effectiveBuzzerOn   ? 'on' : 'off';
   const mqttOk = liveState?.connected === true;
 
   return (

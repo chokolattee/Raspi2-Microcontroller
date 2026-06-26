@@ -82,19 +82,44 @@ class MQTTClient:
     def publish_command(self, topic: str, payload: str):
         """
         Publish an actuator command (e.g. 'ON', 'OFF', 'AUTO') and
-        update the internal mode tracking.
+        update the internal mode/state tracking immediately (optimistic update).
+        This ensures /api/sensors/live reflects the intended state right away,
+        before the ESP32 confirms via its next sensor publish.
         """
-        # Update mode tracking before publishing
         if topic == self.FAN_CMD:
             if payload == "AUTO":
                 self._fan_mode = "automatic"
-            else:
+                with self._lock:
+                    self._latest["fan_auto"] = True
+                    # AUTO: state will be driven by auto logic; mark unknown (False until confirmed)
+                    self._latest["fan"] = False
+            elif payload == "ON":
                 self._fan_mode = "manual"
+                with self._lock:
+                    self._latest["fan_auto"] = False
+                    self._latest["fan"] = True
+            elif payload == "OFF":
+                self._fan_mode = "manual"
+                with self._lock:
+                    self._latest["fan_auto"] = False
+                    self._latest["fan"] = False
+
         elif topic == self.BUZZER_CMD:
             if payload == "AUTO":
                 self._buzzer_mode = "automatic"
-            else:
+                with self._lock:
+                    self._latest["buzzer_auto"] = True
+                    self._latest["buzzer"] = False
+            elif payload == "ON":
                 self._buzzer_mode = "manual"
+                with self._lock:
+                    self._latest["buzzer_auto"] = False
+                    self._latest["buzzer"] = True
+            elif payload == "OFF":
+                self._buzzer_mode = "manual"
+                with self._lock:
+                    self._latest["buzzer_auto"] = False
+                    self._latest["buzzer"] = False
 
         result = self._client.publish(topic, payload, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
@@ -164,16 +189,28 @@ class MQTTClient:
         # Compute UV index from float already provided by ESP32
         uv_index = round(uv_float, 2)
 
-        # Update in-memory latest state
+        # Update in-memory latest state.
+        # In manual mode, trust the backend-commanded state rather than the
+        # ESP32 payload — the ESP32 may publish a stale auto-driven value
+        # before it receives and processes the MQTT command.
         with self._lock:
+            # Resolve effective fan/buzzer state:
+            # - automatic mode: use the ESP32-reported value (auto logic is live)
+            # - manual mode: use whatever the last command set (_latest already
+            #   holds this from publish_command's optimistic update)
+            effective_fan    = fan_on    if self._fan_mode    == "automatic" else self._latest["fan"]
+            effective_buzzer = buzzer_on if self._buzzer_mode == "automatic" else self._latest["buzzer"]
+
             self._latest.update({
                 "temperature":  temp,
                 "humidity":     hum,
                 "uv_index":     uv_index,
-                "fan":          fan_on,
-                "buzzer":       buzzer_on,
-                "fan_auto":     bool(data.get("fan_auto", 1)),
-                "buzzer_auto":  bool(data.get("buzzer_auto", 1)),
+                "fan":          effective_fan,
+                "buzzer":       effective_buzzer,
+                # Use the backend-tracked mode (set by publish_command) as the
+                # source of truth — not the ESP32 payload default which is always 1.
+                "fan_auto":     self._fan_mode    == "automatic",
+                "buzzer_auto":  self._buzzer_mode == "automatic",
                 "last_updated": ts,
             })
 

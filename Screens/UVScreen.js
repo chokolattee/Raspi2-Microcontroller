@@ -7,7 +7,7 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.0.102:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_BASE_URL;
 const LIVE_MS = 3000;
 const HISTORY_MS = 10000;
 const MAX_LIVE_PTS = 20;
@@ -36,8 +36,11 @@ function formatTs(ts) {
   } catch { return ts; }
 }
 
+// Shared headers: bypass ngrok browser-warning interstitial on free tunnels
+const NGROK_HEADERS = { 'ngrok-skip-browser-warning': '1' };
+
 async function apiFetch(path) {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const res = await fetch(`${BASE_URL}${path}`, { headers: NGROK_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -45,7 +48,7 @@ async function apiFetch(path) {
 async function apiPost(path, body) {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...NGROK_HEADERS },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -222,10 +225,9 @@ function BuzzerControl({ mode, state, onAuto, onManualOn, onManualOff, theme }) 
           style={[styles.secondaryBtn, {
             backgroundColor: !isAuto && isOn ? theme.danger : theme.dangerLight,
             borderColor: theme.danger,
-            opacity: isAuto ? 0.42 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOn}
-          disabled={isAuto}
         >
           <Ionicons name="notifications" size={18} color={!isAuto && isOn ? '#fff' : theme.danger} />
           <Text style={[styles.secondaryBtnText, { color: !isAuto && isOn ? '#fff' : theme.danger }]}>
@@ -238,10 +240,9 @@ function BuzzerControl({ mode, state, onAuto, onManualOn, onManualOff, theme }) 
           style={[styles.secondaryBtn, {
             backgroundColor: !isAuto && !isOn ? theme.success : theme.successLight,
             borderColor: theme.success,
-            opacity: isAuto ? 0.42 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOff}
-          disabled={isAuto}
         >
           <Ionicons name="notifications-off-outline" size={18} color={!isAuto && !isOn ? '#fff' : theme.success} />
           <Text style={[styles.secondaryBtnText, { color: !isAuto && !isOn ? '#fff' : theme.success }]}>
@@ -274,6 +275,10 @@ export default function UVScreen() {
 
   // Live snapshot from MQTT (drives hero card + buzzer state)
   const [liveState, setLiveState] = useState(null);
+
+  // Local override — survives fetchLive() polls for OVERRIDE_TTL ms
+  const OVERRIDE_TTL = 8000;
+  const [localOverride, setLocalOverride] = useState(null);
 
   // Rolling graph arrays
   const [liveUV, setLiveUV] = useState([]);
@@ -326,9 +331,13 @@ export default function UVScreen() {
   const controlBuzzer = async (mode, state = 'off') => {
     try {
       await apiPost('/api/buzzer/control', { mode, state });
-      setLiveState((prev) => prev
-        ? { ...prev, buzzer: state === 'on', buzzer_auto: mode === 'automatic' }
-        : prev);
+      // Set local override so the UI doesn't revert on next fetchLive() poll
+      setLocalOverride((prev) => ({
+        ...(prev || {}),
+        buzzer_auto: mode === 'automatic',
+        buzzer: state === 'on',
+        ts: Date.now(),
+      }));
       fetchHistory();
     } catch (e) { console.error(e); }
   };
@@ -347,8 +356,13 @@ export default function UVScreen() {
     ? Math.round((liveState.uv_index * 100.0 / 3300.0) * 4095.0)
     : null;
   const level = getUVLevel(uvIndex);
-  const buzzerMode = liveState?.buzzer_auto === false ? 'manual' : 'automatic';
-  const buzzerState = liveState?.buzzer ? 'on' : 'off';
+  // Merge live snapshot with active local override
+  const overrideActive = localOverride && (Date.now() - localOverride.ts) < OVERRIDE_TTL;
+  const effectiveBuzzerAuto = overrideActive && localOverride.buzzer_auto !== undefined ? localOverride.buzzer_auto : liveState?.buzzer_auto;
+  const effectiveBuzzerOn   = overrideActive && localOverride.buzzer      !== undefined ? localOverride.buzzer      : liveState?.buzzer;
+
+  const buzzerMode  = effectiveBuzzerAuto === false ? 'manual' : 'automatic';
+  const buzzerState = effectiveBuzzerOn   ? 'on' : 'off';
   const lastUpdated = liveState?.last_updated;
 
   // Chart data — prefer live rolling points; fall back to DB history on first load
@@ -472,7 +486,7 @@ export default function UVScreen() {
         </View>
 
         <Text style={[styles.heroTs, { color: theme.textMuted }]}>
-          Last updated: {formatTs(uvLatest?.timestamp)}
+          Last updated: {formatTs(lastUpdated?.timestamp)}
         </Text>
       </View>
 

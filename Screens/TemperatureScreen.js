@@ -7,7 +7,7 @@ import { LineChart } from 'react-native-chart-kit';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 
-const BASE_URL = 'http://192.168.0.102:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_BASE_URL;
 const LIVE_MS = 3000;
 const HISTORY_MS = 10000;
 const MAX_LIVE_PTS = 20;
@@ -23,8 +23,11 @@ function formatTs(ts) {
   } catch { return ts; }
 }
 
+// Shared headers: bypass ngrok browser-warning interstitial on free tunnels
+const NGROK_HEADERS = { 'ngrok-skip-browser-warning': '1' };
+
 async function apiFetch(path) {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const res = await fetch(`${BASE_URL}${path}`, { headers: NGROK_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -32,7 +35,7 @@ async function apiFetch(path) {
 async function apiPost(path, body) {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...NGROK_HEADERS },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -159,10 +162,9 @@ function FanControl({ mode, state, onAuto, onManualOn, onManualOff, theme }) {
           style={[styles.secondaryBtn, {
             backgroundColor: !isAuto && isOn ? theme.success : theme.successLight,
             borderColor: theme.success,
-            opacity: isAuto ? 0.42 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOn}
-          disabled={isAuto}
         >
           <Ionicons name="power" size={18} color={!isAuto && isOn ? '#fff' : theme.success} />
           <Text style={[styles.secondaryBtnText, { color: !isAuto && isOn ? '#fff' : theme.success }]}>
@@ -175,10 +177,9 @@ function FanControl({ mode, state, onAuto, onManualOn, onManualOff, theme }) {
           style={[styles.secondaryBtn, {
             backgroundColor: !isAuto && !isOn ? theme.danger : theme.dangerLight,
             borderColor: theme.danger,
-            opacity: isAuto ? 0.42 : 1,
+            opacity: isAuto ? 0.65 : 1,
           }]}
           onPress={onManualOff}
-          disabled={isAuto}
         >
           <Ionicons name="power-outline" size={18} color={!isAuto && !isOn ? '#fff' : theme.danger} />
           <Text style={[styles.secondaryBtnText, { color: !isAuto && !isOn ? '#fff' : theme.danger }]}>
@@ -211,6 +212,10 @@ export default function TemperatureScreen() {
 
   // Live snapshot from MQTT (drives hero card + fan state)
   const [liveState, setLiveState] = useState(null);
+
+  // Local override — survives fetchLive() polls for OVERRIDE_TTL ms
+  const OVERRIDE_TTL = 8000;
+  const [localOverride, setLocalOverride] = useState(null);
 
   // Rolling graph arrays for live chart
   const [liveTemp, setLiveTemp] = useState([]);
@@ -269,10 +274,13 @@ export default function TemperatureScreen() {
   const controlFan = async (mode, state = 'off') => {
     try {
       await apiPost('/api/fan/control', { mode, state });
-      // Optimistic update so badge flips instantly
-      setLiveState((prev) => prev
-        ? { ...prev, fan: state === 'on', fan_auto: mode === 'automatic' }
-        : prev);
+      // Set local override so the UI doesn't revert on next fetchLive() poll
+      setLocalOverride((prev) => ({
+        ...(prev || {}),
+        fan_auto: mode === 'automatic',
+        fan: state === 'on',
+        ts: Date.now(),
+      }));
       fetchHistory();
     } catch (e) { console.error(e); }
   };
@@ -287,8 +295,14 @@ export default function TemperatureScreen() {
 
   const temp = liveState?.temperature;
   const hum = liveState?.humidity;
-  const fanMode = liveState?.fan_auto === false ? 'manual' : 'automatic';
-  const fanState = liveState?.fan ? 'on' : 'off';
+
+  // Merge live snapshot with active local override
+  const overrideActive = localOverride && (Date.now() - localOverride.ts) < OVERRIDE_TTL;
+  const effectiveFanAuto = overrideActive && localOverride.fan_auto !== undefined ? localOverride.fan_auto : liveState?.fan_auto;
+  const effectiveFanOn   = overrideActive && localOverride.fan      !== undefined ? localOverride.fan      : liveState?.fan;
+
+  const fanMode  = effectiveFanAuto === false ? 'manual' : 'automatic';
+  const fanState = effectiveFanOn   ? 'on' : 'off';
   const tempColor = temp >= 35 ? theme.danger : temp >= 30 ? theme.warning : theme.primary;
 
   // Chart arrays — prefer live points; fall back to DB history for initial render
@@ -393,7 +407,7 @@ export default function TemperatureScreen() {
         </View>
 
         <Text style={[styles.heroTs, { color: theme.textMuted }]}>
-          Last updated: {formatTs(tempLatest?.timestamp)}
+          Last updated: {formatTs(lastUpdated)}
         </Text>
       </View>
 
