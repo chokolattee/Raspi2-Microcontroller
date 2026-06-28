@@ -64,3 +64,6 @@ esp32.ino
 # Claude
 claude.md
 .claudeignore
+
+program.md
+LIBRARIES.md

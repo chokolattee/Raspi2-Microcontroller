@@ -22,7 +22,7 @@ const UV_LEVELS = [
 ];
 
 function getUVLevel(index) {
-  return UV_LEVELS.find((l) => index >= l.min && index <= l.max) || UV_LEVELS[0];
+  return UV_LEVELS.slice().reverse().find((l) => index >= l.min) || UV_LEVELS[0];
 }
 
 // Helpers 
@@ -90,7 +90,7 @@ function SensorInfo({ theme }) {
         <View style={styles.logicRow}>
           <Ionicons name="arrow-forward-outline" size={14} color={theme.danger} style={{ marginRight: 6 }} />
           <Text style={[styles.logicText, { color: theme.text }]}>
-            UV Index ≥ 3 (Moderate) → Buzzer{' '}
+            UV Index ≥ 6 (High) → Buzzer{' '}
             <Text style={{ color: theme.danger, fontWeight: '700' }}>ON</Text>
             {' '}— alert for potentially harmful UV exposure
           </Text>
@@ -99,7 +99,7 @@ function SensorInfo({ theme }) {
         <View style={styles.logicRow}>
           <Ionicons name="arrow-forward-outline" size={14} color={theme.success} style={{ marginRight: 6 }} />
           <Text style={[styles.logicText, { color: theme.text }]}>
-            UV Index {'<'} 3 (Low) → Buzzer{' '}
+            UV Index {'<'} 6 (Low/Moderate) → Buzzer{' '}
             <Text style={{ color: theme.success, fontWeight: '700' }}>OFF</Text>
             {' '}— safe UV level
           </Text>
@@ -125,7 +125,7 @@ function SensorInfo({ theme }) {
             <Text style={[styles.scaleRange, { color: theme.textSecondary }]}>
               Index {l.min}–{l.max === 99 ? '11+' : l.max}
             </Text>
-            {l.min >= 3 && (
+            {l.min >= 6 && (
               <View style={[styles.alertBadge, { backgroundColor: l.color + '22' }]}>
                 <Ionicons name="notifications-outline" size={10} color={l.color} style={{ marginRight: 3 }} />
                 <Text style={[styles.alertBadgeText, { color: l.color }]}>Buzzer ON</Text>
@@ -216,7 +216,7 @@ function BuzzerControl({ mode, state, onAuto, onManualOn, onManualOff, theme }) 
           <Ionicons name="sync-outline" size={18} color={isAuto ? '#fff' : theme.primary} />
           <Text style={[styles.primaryBtnText, { color: isAuto ? '#fff' : theme.primary }]}>Automatic</Text>
           <Text style={[styles.primaryBtnSub, { color: isAuto ? 'rgba(255,255,255,0.75)' : theme.textSecondary }]}>
-            UV ≥ 3 → Buzzer ON
+            UV ≥ 6 → Buzzer ON
           </Text>
         </TouchableOpacity>
 
@@ -462,24 +462,24 @@ export default function UVScreen() {
             <View style={[
               styles.statBox,
               {
-                backgroundColor: uvIndex >= 3 ? theme.dangerLight : theme.successLight,
+                backgroundColor: uvIndex >= 6 ? theme.dangerLight : theme.successLight,
                 flex: isWide ? 1 : undefined,
                 minWidth: 110,
               },
             ]}>
               <View style={styles.statBoxHeader}>
                 <Ionicons
-                  name={uvIndex >= 3 ? 'notifications' : 'notifications-off-outline'}
+                  name={uvIndex >= 6 ? 'notifications' : 'notifications-off-outline'}
                   size={13}
-                  color={uvIndex >= 3 ? theme.danger : theme.success}
+                  color={uvIndex >= 6 ? theme.danger : theme.success}
                   style={{ marginRight: 4 }}
                 />
-                <Text style={[styles.statLabel, { color: uvIndex >= 3 ? theme.danger : theme.success }]}>
+                <Text style={[styles.statLabel, { color: uvIndex >= 6 ? theme.danger : theme.success }]}>
                   Buzzer Alert
                 </Text>
               </View>
-              <Text style={[styles.statValue, { color: uvIndex >= 3 ? theme.danger : theme.success, fontSize: 14 }]}>
-                {uvIndex >= 3 ? 'Triggered' : 'Safe Level'}
+              <Text style={[styles.statValue, { color: uvIndex >= 6 ? theme.danger : theme.success, fontSize: 14 }]}>
+                {uvIndex >= 6 ? 'Triggered' : 'Safe Level'}
               </Text>
             </View>
           </View>
@@ -538,7 +538,7 @@ export default function UVScreen() {
             <View style={[styles.thresholdLine, { backgroundColor: theme.danger }]} />
             <Ionicons name="notifications-outline" size={12} color={theme.danger} style={{ marginHorizontal: 4 }} />
             <Text style={[styles.thresholdText, { color: theme.danger }]}>
-              Buzzer threshold at UV Index 3
+              Buzzer threshold at UV Index 6
             </Text>
           </View>
         </View>
